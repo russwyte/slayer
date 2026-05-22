@@ -3,6 +3,7 @@
 N-arity, multi-param-list, generics-aware ZIO service stubbing for Scala 3.
 
 [![Scala CI](https://github.com/russwyte/slayer/actions/workflows/scala.yml/badge.svg)](https://github.com/russwyte/slayer/actions/workflows/scala.yml)
+[![Maven Repository](https://img.shields.io/maven-central/v/io.github.russwyte/slayer_3?logo=apachemaven)](https://mvnrepository.com/artifact/io.github.russwyte/slayer)
 
 `slayer` is a small library for stubbing service traits in ZIO tests. Given any service trait, you can synthesize a
 `ZLayer` that satisfies it and configure per-method behavior from the test body. It is inspired by Kit Langton's
