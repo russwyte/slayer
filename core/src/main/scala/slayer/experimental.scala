@@ -11,7 +11,7 @@ import scala.quoted.*
   * We cast the user-facing `Quotes` to `QuotesImpl`, do the call there, and cast the result back. From the call site's
   * perspective there is no experimental API in sight, so neither slayer nor its users need the flag.
   *
-  * This is the same trick stubby uses; revisit when Scala promotes these APIs.
+  * This is a known Scala 3 macro-community pattern (stubby uses it too); revisit when Scala promotes these APIs.
   */
 
 def newClassSym(using

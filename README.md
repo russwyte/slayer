@@ -3,8 +3,8 @@
 N-arity, multi-param-list, generics-aware ZIO service stubbing for Scala 3.
 
 `slayer` is a small library for stubbing service traits in ZIO tests. Given any service trait, you can synthesize a
-`ZLayer` that satisfies it and configure per-method behavior from the test body. It is the successor to
-[stubby](https://github.com/russwyte/stubby), addressing four limitations:
+`ZLayer` that satisfies it and configure per-method behavior from the test body. It is inspired by Kit Langton's
+[stubby](https://github.com/kitlangton/stubby) and addresses four of its limitations:
 
 1. **No arity ceiling** — stubby hardcoded `F1..F9`. slayer unrolls the user's handler into an `Array[Any] => Any`
    adapter, so any number of parameters works.
