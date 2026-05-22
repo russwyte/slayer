@@ -58,15 +58,15 @@ end ClassDef
 /** Attach an `@targetName(name)` annotation to the given (synthesized) symbol.
   *
   * The `Quotes.reflect.Symbol` API has no surface for adding annotations to a synthesized symbol — `newMethod` and
-  * `newClass` produce annotation-free symbols, and the reflect API exposes only read-side accessors
-  * (`hasAnnotation`, `getAnnotation`, `annotations`). Without an annotation, an override of an abstract
-  * `@targetName`-renamed method is rejected by the Scala compiler ("misses a target name annotation"), which would
-  * make `stubbed[Service]` fail for any service whose abstract methods carry `@targetName`.
+  * `newClass` produce annotation-free symbols, and the reflect API exposes only read-side accessors (`hasAnnotation`,
+  * `getAnnotation`, `annotations`). Without an annotation, an override of an abstract `@targetName`-renamed method is
+  * rejected by the Scala compiler ("misses a target name annotation"), which would make `stubbed[Service]` fail for any
+  * service whose abstract methods carry `@targetName`.
   *
   * The compiler-internal `dotty.tools.dotc.core.SymDenotations.SymDenotation` does expose `addAnnotation`, and the
-  * `QuotesImpl` already in scope at macro expansion gives us the `Context` we need. We build the annotation tree
-  * (`new targetName("bang")`) and attach it to the synthesized symbol's denotation directly. This is the same family
-  * of "cast through QuotesImpl to reach an unsurfaced compiler API" trick we already use for `Symbol.newClass` /
+  * `QuotesImpl` already in scope at macro expansion gives us the `Context` we need. We build the annotation tree (`new
+  * targetName("bang")`) and attach it to the synthesized symbol's denotation directly. This is the same family of "cast
+  * through QuotesImpl to reach an unsurfaced compiler API" trick we already use for `Symbol.newClass` /
   * `ClassDef.apply` — see top of file.
   *
   * Revisit when (if) Scala promotes a public `Symbol.addAnnotation` API.
@@ -79,12 +79,12 @@ def addTargetNameAnnotation(using Quotes)(sym: quotes.reflect.Symbol, name: Stri
   import dotty.tools.dotc.core.Symbols
   import dotty.tools.dotc.util.Spans.NoSpan
 
-  val iq                              = quotes.asInstanceOf[scala.quoted.runtime.impl.QuotesImpl]
-  given ctx: Context                  = iq.ctx
-  val dottySym: Symbols.Symbol        = sym.asInstanceOf[Symbols.Symbol]
-  val targetNameCls: Symbols.Symbol   = Symbols.requiredClass("scala.annotation.targetName")
-  val argTree: tpd.Tree               = tpd.Literal(Constant(name))
-  val annot: Annotations.Annotation   =
+  val iq                            = quotes.asInstanceOf[scala.quoted.runtime.impl.QuotesImpl]
+  given ctx: Context                = iq.ctx
+  val dottySym: Symbols.Symbol      = sym.asInstanceOf[Symbols.Symbol]
+  val targetNameCls: Symbols.Symbol = Symbols.requiredClass("scala.annotation.targetName")
+  val argTree: tpd.Tree             = tpd.Literal(Constant(name))
+  val annot: Annotations.Annotation =
     Annotations.Annotation(targetNameCls.asClass, argTree :: Nil, NoSpan)
   dottySym.denot.addAnnotation(annot)
 end addTargetNameAnnotation

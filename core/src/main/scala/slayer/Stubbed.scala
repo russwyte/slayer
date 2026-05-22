@@ -45,6 +45,17 @@ trait Stubbed[A]:
     val r = ref.get(id)
     if r == null then throw SlayerError.NoStub(id)
     else r.call(args).asInstanceOf[R]
+
+  /** Look up a stub; if none is registered, evaluate `fallback` and return its result. Used by the synthesized class
+    * for concrete trait methods, so that `_.hello` falls through to the trait's `hello` impl when no stub overrides it.
+    * `fallback` is by-name so the macro can pass a `super.<method>(args)` expression directly without wrapping it in a
+    * `() =>` lambda — which would fail with a "could not find proxy" error because the lambda body captures the
+    * override method's parameter symbols.
+    */
+  def callStubbedOrElse[R](id: MethodId, args: Array[Any], fallback: => R): R =
+    val r = ref.get(id)
+    if r == null then fallback
+    else r.call(args).asInstanceOf[R]
 end Stubbed
 
 object Stubbed:

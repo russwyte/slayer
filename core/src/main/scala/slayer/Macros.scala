@@ -455,7 +455,15 @@ private[slayer] object Macros:
 
     val serviceRepr = TypeRepr.of[Service]
     val serviceSym  = serviceRepr.typeSymbol
-    val methods     = serviceSym.declaredMethods
+    // Synthesize overrides for both abstract and concrete trait methods, but skip:
+    //   - `<name>$default$<n>` getters: synthetic, inherited from the trait at the JVM level — overriding them would
+    //     produce duplicate-method JVM errors.
+    //   - any other Synthetic-flagged member: e.g. case-class accessors on data traits, equality probes, etc.
+    // Abstract methods get a `callStubbed` body (throws NoStub when missing). Concrete methods get a
+    // `callStubbedOrElse` body that falls through to the trait's impl via super.<method>(...) when no stub is set.
+    val methods = serviceSym.declaredMethods.filter { m =>
+      !m.flags.is(Flags.Synthetic) && !m.name.contains("$default$")
+    }
 
     val tagExpr = Expr.summon[zio.Tag[Service]].getOrElse {
       report.errorAndAbort(
@@ -476,7 +484,10 @@ private[slayer] object Macros:
 
     def decls(cls: Symbol): List[Symbol] =
       methods.map { m =>
-        val newSym = Symbol.newMethod(cls, m.name, serviceRepr.memberType(m))
+        // Concrete trait methods need `Flags.Override` on the synthesized symbol — otherwise the compiler rejects the
+        // class with "method needs `override` modifier". Abstract methods (Deferred) need no flag.
+        val flags  = if m.flags.is(Flags.Deferred) then Flags.EmptyFlags else Flags.Override
+        val newSym = Symbol.newMethod(cls, m.name, serviceRepr.memberType(m), flags, Symbol.noSymbol)
         // If the trait method carries `@targetName("foo")`, the override must too — otherwise the compiler rejects
         // the override with "misses a target name annotation". Quotes' newMethod gives no way to attach annotations,
         // so we reach into the compiler-internal SymDenotation via `experimental.addTargetNameAnnotation`.
@@ -494,36 +505,28 @@ private[slayer] object Macros:
 
     val thisExpr = This(cls).asExprOf[Service & Stubbed[Service]]
 
-    // Build one DefDef per declared method on the synthesized class. The body packs `argss.flatten` into an Array[Any]
-    // and dispatches through `callStubbed`.
+    // Build one DefDef per declared method on the synthesized class. Abstract trait methods → callStubbed (throws
+    // NoStub). Concrete trait methods → callStubbedOrElse with a super-call fallback so the trait's impl runs when
+    // no stub is registered.
     val body: List[Statement] = cls.declaredMethods.map { method =>
       val methodIdExpr = methodIdOf(method)
       val listFlags    = parameterListFlags(method.termRef)
+      // Look up the trait method this override targets — needed for the super-call when the trait method is concrete.
+      val traitMethod = methods.find(_.name == method.name).getOrElse(method)
+      val isConcrete  = !traitMethod.flags.is(Flags.Deferred)
 
       DefDef(
         method,
         argss =>
           Some {
-            // Probe-confirmed argss shape (DefDefArgssProbeSpec):
-            //   - simple/curried/using : every list is a List[Term].
-            //   - generic methods       : leading list is List[TypeTree], following lists are List[Term].
-            // We pattern-match on the list contents to split.
             val (typeArgLists, valueArgLists) = argss.partition {
-              case Nil               => false
+              case Nil                => false
               case (_: TypeTree) :: _ => true
               case _                  => false
             }
             val typeArgs: List[TypeRepr] =
               typeArgLists.flatten.collect { case tt: TypeTree => tt.tpe }
 
-            // Walk the method's widened type, substituting type args at the outermost PolyType, then descending
-            // through MethodType layers to the final return type.
-            //
-            // Important: `method.termRef.appliedTo(targs)` interprets the TermRef as a path and produces a
-            // path-dependent type (`this.method[A]`), not a method instantiation. To do a real type-parameter
-            // substitution on a `PolyType`, use `pt.resType.substituteTypes(paramSyms, targs)` — but `PolyType`
-            // does not expose its param symbols. We work around that by calling `pt.appliedTo(targs)` on the
-            // *widened* PolyType (a TypeRepr, not a TermRef), which performs the right substitution.
             def finalReturnOf(t: TypeRepr): TypeRepr = t match
               case mt: MethodType => finalReturnOf(mt.resType)
               case pt: PolyType   =>
@@ -532,17 +535,29 @@ private[slayer] object Macros:
               case other => other
             val finalReturn = finalReturnOf(method.termRef.widenTermRefByName)
 
-            // Drop using/implicit value lists. listFlags has one entry per MethodType list (poly lists excluded), so
-            // it lines up 1:1 with valueArgLists.
             val keptLists =
-              if valueArgLists.size == listFlags.size then
-                valueArgLists.zip(listFlags).collect { case (l, false) => l }
+              if valueArgLists.size == listFlags.size then valueArgLists.zip(listFlags).collect { case (l, false) => l }
               else valueArgLists
             val termArgs = keptLists.flatten.collect { case t: Term => t.asExprOf[Any] }
             val arr      = '{ Array[Any](${ Varargs(termArgs) }*) }
 
             finalReturn.asType match
-              case '[r] => '{ $thisExpr.callStubbed[r]($methodIdExpr, $arr) }.asTerm
+              case '[r] =>
+                if isConcrete then
+                  // Build `super.<method>[typeArgs](args0)(args1)...` — passes ALL value lists (including using/implicit)
+                  // through to the trait so the original method semantics are preserved on fallback.
+                  val superSelect: Term  = Select(Super(This(cls), None), traitMethod)
+                  val withTypeArgs: Term =
+                    if typeArgs.isEmpty then superSelect
+                    else TypeApply(superSelect, typeArgs.map(t => TypeTree.of(using t.asType)))
+                  val superCall: Term =
+                    valueArgLists.foldLeft(withTypeArgs) { (acc, list) =>
+                      Apply(acc, list.collect { case t: Term => t })
+                    }
+                  val fallback = superCall.asExprOf[r]
+                  '{ $thisExpr.callStubbedOrElse[r]($methodIdExpr, $arr, $fallback) }.asTerm
+                else '{ $thisExpr.callStubbed[r]($methodIdExpr, $arr) }.asTerm
+            end match
           },
       )
     }
@@ -670,9 +685,9 @@ private[slayer] object Macros:
       perListElementShows: List[List[String]],
       methodReturnTypeShow: String,
       // Extras to understand generic-method substitution.
-      methodTermRefRaw: String,        // m.termRef.show — the full polymorphic type
-      typeTreeTpes: List[String],      // for any TypeTree elements in argss, their .tpe.show
-      valueIdentTpes: List[String],    // for any Term elements, their .tpe.show
+      methodTermRefRaw: String,    // m.termRef.show — the full polymorphic type
+      typeTreeTpes: List[String],  // for any TypeTree elements in argss, their .tpe.show
+      valueIdentTpes: List[String], // for any Term elements, their .tpe.show
   )
 
   inline def probeDefDefArgss[Service](methodName: String): ArgssProbe =
@@ -681,10 +696,10 @@ private[slayer] object Macros:
   private def probeDefDefArgssImpl[Service: Type](methodName: Expr[String])(using Quotes): Expr[ArgssProbe] =
     import quotes.reflect.*
 
-    val name = methodName.valueOrAbort
+    val name        = methodName.valueOrAbort
     val serviceRepr = TypeRepr.of[Service]
     val serviceSym  = serviceRepr.typeSymbol
-    val target = serviceSym.declaredMethods
+    val target      = serviceSym.declaredMethods
       .find(_.name == name)
       .getOrElse(report.errorAndAbort(s"probeDefDefArgss: no method $name on ${serviceRepr.show}"))
 
@@ -706,10 +721,10 @@ private[slayer] object Macros:
     cls.declaredMethods.foreach { m =>
       DefDef(
         m,
-        argss => {
+        argss =>
           val classes = argss.map(_.map(_.getClass.getSimpleName))
           val shows   = argss.map(_.map {
-            case t: Term     => t.tpe.show
+            case t: Term      => t.tpe.show
             case tt: TypeTree => "TypeTree:" + tt.tpe.show
             case other        => other.toString
           })
@@ -717,15 +732,14 @@ private[slayer] object Macros:
             case mt: MethodType => mt.resType.show
             case pt: PolyType   => pt.resType.show
             case other          => other.show
-          val termRefRaw = m.termRef.show
-          val typeTreeTpes = argss.flatten.collect { case tt: TypeTree => tt.tpe.show }
+          val termRefRaw     = m.termRef.show
+          val typeTreeTpes   = argss.flatten.collect { case tt: TypeTree => tt.tpe.show }
           val valueIdentTpes = argss.flatten.collect { case t: Term => t.tpe.show }
           captured = Some(
             (argss.size, argss.map(_.size), classes, shows, ret, termRefRaw, typeTreeTpes, valueIdentTpes)
           )
           // Return null literal of the appropriate type just to avoid further crashes; we only care about argss.
-          Some(Literal(NullConstant()))
-        },
+          Some(Literal(NullConstant())),
       )
     }
 

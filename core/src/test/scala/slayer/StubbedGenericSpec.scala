@@ -26,7 +26,7 @@ object StubbedGenericSpec extends ZIOSpecDefault:
     },
     test("method with using clause — implicit dropped from key and array") {
       given String = "ctx"
-      val program =
+      val program  =
         for
           _   <- stub[Repo](_.lookup(slayer.any))(99)
           got <- ZIO.serviceWith[Repo](_.lookup(7))

@@ -84,6 +84,53 @@ stub[AuditLog](_.record(any[OrderId])(any[String])(any[String])) {
 Both work end-to-end. See [`ExampleSpec`](core/src/test/scala/slayer/ExampleSpec.scala) for a full set of patterns
 including failing effects, captured calls, branching handlers, and re-stubbing mid-test.
 
+### Concrete (default) trait methods
+
+If your trait already provides an implementation for a method, slayer falls through to that implementation by default
+— you don't need to stub it. You can still stub it if you want to override the trait's logic in a test:
+
+```scala
+trait Greeter:
+  def name: String                         // abstract — must be stubbed
+  def hello: String = s"hello, $name"      // concrete — has a default impl
+
+// Fall-through: trait's `hello` runs, reading the stubbed `name`.
+stub[Greeter](_.name)("alice")
+ZIO.serviceWith[Greeter](_.hello)          // → "hello, alice"
+
+// Override: stubbing the concrete method wins over the trait's impl.
+stub[Greeter](_.hello)("howdy from stub")
+ZIO.serviceWith[Greeter](_.hello)          // → "howdy from stub"
+```
+
+Under the hood, every trait method gets an override on the synthesized class. Abstract methods route to `callStubbed`
+(throws `NoStub` when missing). Concrete methods route to `callStubbedOrElse(...)(super.method(args))`, so a missing
+stub falls through to the trait's original impl.
+
+### Default arguments
+
+Default arguments work transparently — at both the stub site and the call site, you can omit any args that have
+defaults, and the Scala typer fills them in for you. The defaults are evaluated at the call site and flow into the
+handler's arg list, so a handler can read them just like any other argument:
+
+```scala
+trait Multi:
+  def g(a: Int, b: Int = 20, c: Int = 30, d: Int = 40): String
+
+// Stub omits all defaults; handler sees the full filled-in arg list.
+stub[Multi](_.g(any[Int])) { (a: Int, b: Int, c: Int, d: Int) =>
+  s"$a/$b/$c/$d"
+}
+ZIO.serviceWith[Multi](_.g(1))         // → "1/20/30/40"
+ZIO.serviceWith[Multi](_.g(1, 99))     // → "1/99/30/40" (b overridden, c/d defaulted)
+```
+
+Subsets work too: stub `_.g(any[Int], any[Int])` and the rest of the defaults still flow through. Named args that
+skip leading defaults (e.g. `_.h(c = any[Int])` against `def h(a: Int = 1, b: Int = 2, c: Int)`) also work.
+
+See [`DefaultArgSpec`](core/src/test/scala/slayer/DefaultArgSpec.scala) for the full coverage matrix including curried
+methods with defaults across multiple parameter lists.
+
 `stub[S](selector)(result)` — selector is a lambda picking a method; `result` is either a value of the method's return
 type, or a function whose flat parameters match the method's flat value parameters.
 
@@ -107,16 +154,21 @@ produces. Lookup is a single concurrent-map read.
 
 ## Limitations
 
+**Slayer-level:**
+
 - **Generic dispatch is by name + erased value-param types.** Different type-argument instantiations of the same
   method share a stub. For type-discriminated behavior, use a handler that branches on its arguments.
-- **`@targetName`-disambiguated siblings** (two abstract methods with identical source signatures distinguished only
-  by `@targetName`) are a Scala-language limitation: you cannot call them from Scala source — `_.a(x)` is ambiguous,
-  and `_.a1(x)` / `_.a2(x)` aren't members. The trait shape compiles, but no caller can dispatch deterministically.
-  slayer synthesizes the override correctly; the limitation is upstream of the library.
-- **Erasure-collision overloads** (e.g. `def f(xs: List[Int])` vs `def f(xs: List[String])`) collide at the JVM level.
-  Add `@targetName` to disambiguate, just as you would for the JVM.
-- **Default arguments** on stubbed methods are not supported. Pass values explicitly in test code.
-- **`final` methods on classes** can't be stubbed — slayer synthesizes a subclass and overrides; `final` blocks that.
+- **`final` classes** can't be used as the service type — slayer needs to synthesize a subclass.
+- **`final` methods** on a class can't be stubbed (or even left to fall through) — slayer overrides every trait/class
+  method, and `final` blocks the override. Either remove `final` or make the type a trait.
+
+**Scala-language (surfaces before slayer runs, not slayer-specific):**
+
+- **`@targetName`-disambiguated siblings** — two abstract methods with identical source signatures distinguished only
+  by `@targetName`: `_.a(x)` is ambiguous, and `_.a1(x)` / `_.a2(x)` aren't callable members (`@targetName` is purely
+  a JVM-level rename, not a Scala alias). The trait shape compiles, but no caller can dispatch deterministically.
+- **Erasure-collision overloads** — e.g. `def f(xs: List[Int])` vs `def f(xs: List[String])`: Scala rejects the trait
+  declaration itself with "have the same erasure". Add `@targetName` on one to disambiguate.
 
 ## Status
 
