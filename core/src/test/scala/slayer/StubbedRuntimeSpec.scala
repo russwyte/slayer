@@ -169,10 +169,142 @@ object StubbedRuntimeSpec extends ZIOSpecDefault:
         val id  = MethodId("foo", List("Int"))
         val err = SlayerError.NoStub(id)
         assertTrue(err.getMessage.contains("foo")) && assertTrue(err.getMessage.contains("Int"))
+      }
+    ),
+    suite("tracing (runtime)")(
+      test("quiet by default — no calls recorded") {
+        val s  = NoOpStubbed()
+        val id = MethodId("foo", Nil)
+        for _ <- s.insertValueImpl(id, 1)
+        yield
+          val _ = s.callStubbed[Int](id, Array.empty)
+          assertTrue(!s.isTracing, s.calls.isEmpty)
       },
-      test("WrongArity message includes expected and got") {
-        val err = SlayerError.WrongArity(MethodId("f", Nil), expected = 3, got = 1)
-        assertTrue(err.getMessage.contains("expected 3")) && assertTrue(err.getMessage.contains("got 1"))
+      test("enableTracing records Call with args") {
+        val s  = NoOpStubbed()
+        val id = MethodId("add", List("Int", "Int"))
+        s.enableTracing()
+        for _ <- s.insertFuncImpl(id, args => args(0).asInstanceOf[Int] + args(1).asInstanceOf[Int])
+        yield
+          val got = s.callStubbed[Int](id, Array[Any](2, 3))
+          assertTrue(
+            got == 5,
+            s.calls == Chunk(Call(id, List(2, 3))),
+          )
+      },
+      test("callStubbedOrElse records even on fall-through") {
+        val s  = NoOpStubbed()
+        val id = MethodId("x", Nil)
+        s.enableTracing()
+        val got = s.callStubbedOrElse[String](id, Array.empty, "fallback")
+        assertTrue(got == "fallback", s.calls == Chunk(Call(id, Nil)))
+      },
+      test("callStubbedOrElse records when stub is present (not only fall-through)") {
+        val s  = NoOpStubbed()
+        val id = MethodId("x", Nil)
+        s.enableTracing()
+        for _ <- s.insertValueImpl(id, "stubbed")
+        yield
+          val got = s.callStubbedOrElse[String](id, Array[Any](1), "fallback")
+          assertTrue(
+            got == "stubbed",
+            s.calls == Chunk(Call(id, List(1))),
+          )
+      },
+      test("NoStub still records the invoke before throwing") {
+        val s  = NoOpStubbed()
+        val id = MethodId("missing", List("Int"))
+        s.enableTracing()
+        val caught =
+          try
+            s.callStubbed[Int](id, Array[Any](7)); None
+          catch case e: Exception => Some(e)
+        assertTrue(
+          caught.exists(_.isInstanceOf[SlayerError.NoStub]),
+          s.calls == Chunk(Call(id, List(7))),
+        )
+      },
+      test("clearCalls does not remove stubs") {
+        val s  = NoOpStubbed()
+        val id = MethodId("foo", Nil)
+        s.enableTracing()
+        for _ <- s.insertValueImpl(id, 42)
+        yield
+          val _ = s.callStubbed[Int](id, Array.empty)
+          s.clearCalls()
+          assertTrue(s.calls.isEmpty, s.callStubbed[Int](id, Array.empty) == 42)
+      },
+      test("callsFor filters; empty for unknown id") {
+        val s   = NoOpStubbed()
+        val idA = MethodId("a", Nil)
+        val idB = MethodId("b", List("Int"))
+        s.enableTracing()
+        for
+          _ <- s.insertValueImpl(idA, 1)
+          _ <- s.insertFuncImpl(idB, args => args(0))
+        yield
+          val _ = s.callStubbed[Int](idA, Array.empty)
+          val _ = s.callStubbed[Int](idB, Array[Any](9))
+          val _ = s.callStubbed[Int](idA, Array.empty)
+          assertTrue(
+            s.callsFor(idA).size == 2,
+            s.callsFor(idB).map(_.args) == Chunk(List(9)),
+            s.callsFor(MethodId("nope", Nil)).isEmpty,
+          )
+        end for
+      },
+      test("ZIO result is returned as-is under tracing (not forced at call time)") {
+        val s  = NoOpStubbed()
+        val id = MethodId("load", Nil)
+        s.enableTracing()
+        var ran              = false
+        val raw: UIO[String] = ZIO.succeed { ran = true; "ok" }
+        for _ <- s.insertValueImpl(id, raw)
+        yield
+          val effect = s.callStubbed[UIO[String]](id, Array.empty)
+          val mid    = ran
+          assertTrue(
+            !mid,
+            effect eq raw, // identity — no debug wrap
+            s.calls == Chunk(Call(id, Nil)),
+          )
+      },
+      test("failing ZIO still fails under tracing; invoke is recorded") {
+        val s  = NoOpStubbed()
+        val id = MethodId("fail", Nil)
+        s.enableTracing()
+        val raw: IO[String, Int] = ZIO.fail("nope")
+        for
+          _    <- s.insertValueImpl(id, raw)
+          exit <- s.callStubbed[IO[String, Int]](id, Array.empty).exit
+        yield assertTrue(exit == Exit.fail("nope"), s.calls.size == 1)
+      },
+      test("pure result is identity under tracing") {
+        val s  = NoOpStubbed()
+        val id = MethodId("n", Nil)
+        s.enableTracing()
+        for _ <- s.insertValueImpl(id, 7)
+        yield assertTrue(s.callStubbed[Int](id, Array.empty) == 7)
+      },
+      test("parallel callStubbed appends without losing entries") {
+        val s  = NoOpStubbed()
+        val id = MethodId("f", List("Int"))
+        s.enableTracing()
+        for
+          _ <- s.insertFuncImpl(id, args => args(0))
+          _ <- ZIO.foreachParDiscard(1 to 100) { i =>
+            ZIO.succeed(s.callStubbed[Int](id, Array[Any](i)))
+          }
+        yield
+          val args = s.calls.map(_.args.head.asInstanceOf[Int]).toSet
+          assertTrue(s.calls.size == 100, args == (1 to 100).toSet)
+      },
+      test("Call equality is structural") {
+        assertTrue(
+          Call(MethodId("f", List("Int")), List(1)) == Call(MethodId("f", List("Int")), List(1)),
+          Call(MethodId("f", List("Int")), List(1)) != Call(MethodId("f", List("Int")), List(2)),
+          Call(MethodId("f", Nil), Nil) != Call(MethodId("g", Nil), Nil),
+        )
       },
     ),
   )

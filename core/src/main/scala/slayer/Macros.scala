@@ -34,7 +34,9 @@ private[slayer] object Macros:
         case TypeApply(inner, targs) =>
           // Inner-most TypeApply wins (a method generic in two scopes is rare; we capture the closest layer).
           loop(inner, if accTypeArgs.isEmpty then targs.map(_.tpe) else accTypeArgs)
-        case sel: Select if sel.symbol.flags.is(Flags.Method) =>
+        // Methods and abstract/concrete vals (getters). Abstract `val`s on traits surface as term members that may
+        // be `isValDef` rather than `Flags.Method` depending on the compiler's view of the symbol.
+        case sel: Select if sel.symbol.isTerm && (sel.symbol.flags.is(Flags.Method) || sel.symbol.isValDef) =>
           Some(sel.symbol -> accTypeArgs)
         // A Scala 3 lambda after `underlyingArgument` is desugared to:
         //   Block(List(DefDef("$anonfun", ..., rhs)), Closure(Ident("$anonfun"), _))
@@ -102,9 +104,16 @@ private[slayer] object Macros:
     *     share `jvmName = "f"` but differ in `erasedParams`.
     */
   def methodIdOf(using Quotes)(sym: quotes.reflect.Symbol): Expr[MethodId] =
+    val (jvmName, erased) = methodKeyOf(sym)
+    '{ MethodId(${ Expr(jvmName) }, ${ Expr(erased) }) }
+
+  /** Compile-time key matching `MethodId`: `(jvmName, erasedParams)`. Used both for the runtime id and to match a
+    * synthesized override back to the trait member it implements (name alone is wrong for overloads).
+    */
+  private def methodKeyOf(using Quotes)(sym: quotes.reflect.Symbol): (String, List[String]) =
     val jvmName = jvmNameOf(sym)
     val erased  = flatten(sym.termRef)._2.collect { case (tpe, false) => erasedTypeName(tpe) }
-    '{ MethodId(${ Expr(jvmName) }, ${ Expr(erased) }) }
+    (jvmName, erased)
 
   /** Resolve the JVM-visible name of a method symbol.
     *
@@ -119,6 +128,68 @@ private[slayer] object Macros:
       case Some(Apply(_, List(Literal(StringConstant(name))))) => name
       case _                                                   => sym.name
   end jvmNameOf
+
+  /** Owners of platform members we never synthesize (`equals`, `##`, …) unless the service hierarchy redeclares them
+    * (in which case the owner is the redeclaring trait, not these).
+    */
+  private def excludedPlatformOwners(using Quotes): Set[quotes.reflect.Symbol] =
+    import quotes.reflect.*
+    Set(
+      Symbol.requiredClass("java.lang.Object"),
+      Symbol.requiredClass("scala.Any"),
+      Symbol.requiredClass("scala.Matchable"),
+    )
+
+  /** Collect every non-private method of `service` that slayer should override — declared *and* inherited.
+    *
+    * Uses `methodMembers` (not `declaredMethods`) so parent-trait APIs are included. Filters out:
+    *   - synthetic members and `<name>$default$<n>` accessors
+    *   - constructors
+    *   - members whose owner is `Object` / `Any` / `Matchable`
+    *
+    * Abstract `val`s are **not** in this list — they live on `fieldMembers` and are collected separately (they need
+    * `Symbol.newVal` / `ValDef`, not `newMethod` / `DefDef`).
+    */
+  private def collectServiceMethods(using Quotes)(serviceSym: quotes.reflect.Symbol): List[quotes.reflect.Symbol] =
+    import quotes.reflect.*
+    val excluded = excludedPlatformOwners
+    serviceSym.methodMembers.filter { m =>
+      !m.flags.is(Flags.Synthetic) &&
+      !m.flags.is(Flags.Artifact) &&
+      !m.isClassConstructor &&
+      !m.name.contains("$default$") &&
+      !excluded.contains(m.owner)
+    }
+  end collectServiceMethods
+
+  /** Abstract fields (declared or inherited) that would need a synthetic implementation.
+    *
+    * Abstract `val`s are **not stubbable** with slayer's stub-after-provide model:
+    *   - A plain `val` body runs at construction, before any `stub(...)` effect can register.
+    *   - A `lazy val` may not override a non-lazy abstract val (Scala rejects it).
+    *   - A `def` may not complete an abstract val either ("needs to be a stable, immutable value").
+    *
+    * `stubbed` aborts with a clear error if any are present; change them to `def` on the service trait. Concrete vals
+    * still inherit normally (no override).
+    */
+  private def collectAbstractFields(using
+      Quotes
+  )(
+      serviceSym: quotes.reflect.Symbol,
+      methodNames: Set[String],
+  ): List[quotes.reflect.Symbol] =
+    import quotes.reflect.*
+    val excluded = excludedPlatformOwners
+    serviceSym.fieldMembers.filter { f =>
+      f.flags.is(Flags.Deferred) &&
+      !f.flags.is(Flags.Synthetic) &&
+      !f.flags.is(Flags.Artifact) &&
+      !f.flags.is(Flags.Module) &&
+      !f.flags.is(Flags.Param) &&
+      !excluded.contains(f.owner) &&
+      !methodNames.contains(f.name)
+    }
+  end collectAbstractFields
 
   /** Best-effort erased name for a `TypeRepr`. Used as a string key for plain-overload disambiguation.
     *
@@ -439,31 +510,37 @@ private[slayer] object Macros:
   // stubbedImpl — synthesized service class (M4)
   // -------------------------------------------------------------------------------------------------------------------
 
-  /** Macro implementation for `slayer.stubbed`. Synthesizes a class extending `Service` and `Stubbed[Service]`. Every
-    * declared method on `Service` is implemented by packing its arguments into `Array[Any]` and calling
-    * `this.callStubbed[ReturnType](id, args)`.
+  /** Macro implementation for `slayer.stubbed` / `stubbedTraced`. Synthesizes a class extending `Service` and
+    * `Stubbed[Service]`. Every method of `Service` — declared *or* inherited — is implemented by packing its arguments
+    * into `Array[Any]` and calling `this.callStubbed` / `callStubbedOrElse`.
     *
-    * **M4 scope:** simple methods only — single value parameter list, no type parameters, no contextual/`using`
-    * parameters. Curried lists, implicits, and generics land in M5.
+    * When `traced` is true, the instance gets `enableTracing()` so every invoke records a `Call`.
     *
     * The class itself uses `Symbol.newClass` / `ClassDef`, both of which are `@experimental` on Scala 3.8.x. We route
     * those calls through `slayer.experimental` (which casts to `QuotesImpl`) so neither slayer nor downstream users
     * need the `-experimental` flag.
     */
-  def stubbedImpl[Service: Type](using Quotes): Expr[zio.ULayer[Service & Stubbed[Service]]] =
+  def stubbedImpl[Service: Type](traced: Boolean)(using Quotes): Expr[zio.ULayer[Service & Stubbed[Service]]] =
     import quotes.reflect.*
 
     val serviceRepr = TypeRepr.of[Service]
     val serviceSym  = serviceRepr.typeSymbol
-    // Synthesize overrides for both abstract and concrete trait methods, but skip:
-    //   - `<name>$default$<n>` getters: synthetic, inherited from the trait at the JVM level — overriding them would
-    //     produce duplicate-method JVM errors.
-    //   - any other Synthetic-flagged member: e.g. case-class accessors on data traits, equality probes, etc.
-    // Abstract methods get a `callStubbed` body (throws NoStub when missing). Concrete methods get a
-    // `callStubbedOrElse` body that falls through to the trait's impl via super.<method>(...) when no stub is set.
-    val methods = serviceSym.declaredMethods.filter { m =>
-      !m.flags.is(Flags.Synthetic) && !m.name.contains("$default$")
-    }
+    // Declared *and* inherited methods (parent traits). Abstract methods → callStubbed (throws NoStub when missing).
+    // Concrete methods → callStubbedOrElse with super fall-through. `$default$` / Synthetic filtered out.
+    val methods        = collectServiceMethods(serviceSym)
+    val abstractFields = collectAbstractFields(serviceSym, methods.map(_.name).toSet)
+    if abstractFields.nonEmpty then
+      val names = abstractFields.map(_.name).distinct.mkString(", ")
+      report.errorAndAbort(
+        s"""stubbed: ${serviceSym.fullName} has abstract val(s): $names.
+           |slayer cannot stub abstract vals — they must be stable values evaluated when the layer is built,
+           |which is before any stub(...) call can register. Change them to `def` on the service trait.
+           |(Concrete vals still inherit and fall through without stubbing.)""".stripMargin
+      )
+
+    // Key by (jvmName, erasedParams) so plain overloads don't resolve to the wrong trait member on super-calls.
+    val traitMemberByKey: Map[(String, List[String]), Symbol] =
+      methods.map(m => methodKeyOf(m) -> m).toMap
 
     val tagExpr = Expr.summon[zio.Tag[Service]].getOrElse {
       report.errorAndAbort(
@@ -505,15 +582,15 @@ private[slayer] object Macros:
 
     val thisExpr = This(cls).asExprOf[Service & Stubbed[Service]]
 
-    // Build one DefDef per declared method on the synthesized class. Abstract trait methods → callStubbed (throws
-    // NoStub). Concrete trait methods → callStubbedOrElse with a super-call fallback so the trait's impl runs when
-    // no stub is registered.
+    def lookupTraitMember(sym: Symbol): Symbol =
+      traitMemberByKey.getOrElse(methodKeyOf(sym), sym)
+
+    // Build one DefDef per method. Abstract → callStubbed; concrete → callStubbedOrElse with super fall-through.
     val body: List[Statement] = cls.declaredMethods.map { method =>
       val methodIdExpr = methodIdOf(method)
       val listFlags    = parameterListFlags(method.termRef)
-      // Look up the trait method this override targets — needed for the super-call when the trait method is concrete.
-      val traitMethod = methods.find(_.name == method.name).getOrElse(method)
-      val isConcrete  = !traitMethod.flags.is(Flags.Deferred)
+      val traitMethod  = lookupTraitMember(method)
+      val isConcrete   = !traitMethod.flags.is(Flags.Deferred)
 
       DefDef(
         method,
@@ -576,10 +653,12 @@ private[slayer] object Macros:
     val instanceExpr =
       Block(List(classDef), newInstance).asExprOf[Service & Stubbed[Service]]
 
+    val tracedExpr = Expr(traced)
     '{
       zio.ZLayer.fromZIOEnvironment {
         zio.ZIO.succeed {
           val s = $instanceExpr
+          if $tracedExpr then s.enableTracing()
           zio.ZEnvironment[Service, Stubbed[Service]](s, s)(using $tagExpr, summon[zio.Tag[Stubbed[Service]]])
         }
       }

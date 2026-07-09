@@ -54,5 +54,15 @@ object LimitationsSpec extends ZIOSpecDefault:
       """)
       yield assertTrue(res.isLeft)
     },
+    test("abstract val is rejected — use def instead") {
+      for res <- typeCheck("""
+        import slayer.*
+        trait WithVal { val x: Int }
+        val layer = stubbed[WithVal]
+      """)
+      yield
+        val msg = res.swap.getOrElse("")
+        assertTrue(res.isLeft, msg.contains("abstract val"), msg.contains("def"))
+    },
   )
 end LimitationsSpec

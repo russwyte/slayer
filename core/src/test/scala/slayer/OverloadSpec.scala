@@ -32,6 +32,11 @@ object OverloadSpec extends ZIOSpecDefault:
   trait Renamed:
     @targetName("bang") def !(i: Int): Int
 
+  /** Concrete overloads — super fall-through must resolve by signature, not source name alone. */
+  trait ConcreteOverloads:
+    def describe(i: Int): String    = s"int:$i"
+    def describe(s: String): String = s"str:$s"
+
   // Probe: Scala 3 lets two abstract methods share a source name if @targetName disambiguates them at the JVM level.
   // Trait declaration compiles. Calling them is another matter: `_.a(0)` is ambiguous, and `_.a1(0)` / `_.a2(0)` are
   // rejected ("value a1 is not a member" — @targetName is purely a JVM-level rename, not a Scala alias). So while the
@@ -106,6 +111,25 @@ object OverloadSpec extends ZIOSpecDefault:
         bySource.isLeft, // ambiguous reference
         byJvm.isLeft,    // a1 is not a member; @targetName is JVM-only
       )
+    },
+    test("concrete overloads — each falls through to its own trait impl (not name-collided)") {
+      val program =
+        for
+          a <- ZIO.serviceWith[ConcreteOverloads](_.describe(7))
+          b <- ZIO.serviceWith[ConcreteOverloads](_.describe("x"))
+        yield (a, b)
+      for tup <- program.provide(stubbed[ConcreteOverloads])
+      yield assertTrue(tup == ("int:7", "str:x"))
+    },
+    test("concrete overloads — stubbing one does not replace the other") {
+      val program =
+        for
+          _ <- stub[ConcreteOverloads](_.describe(slayer.any[Int]))("stubbed-int")
+          a <- ZIO.serviceWith[ConcreteOverloads](_.describe(1))
+          b <- ZIO.serviceWith[ConcreteOverloads](_.describe("y"))
+        yield (a, b)
+      for tup <- program.provide(stubbed[ConcreteOverloads])
+      yield assertTrue(tup == ("stubbed-int", "str:y"))
     },
   )
 end OverloadSpec
