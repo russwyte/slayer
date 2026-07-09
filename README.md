@@ -5,9 +5,14 @@ N-arity, multi-param-list, generics-aware ZIO service stubbing for Scala 3.
 [![Scala CI](https://github.com/russwyte/slayer/actions/workflows/scala.yml/badge.svg)](https://github.com/russwyte/slayer/actions/workflows/scala.yml)
 [![Maven Repository](https://img.shields.io/maven-central/v/io.github.russwyte/slayer_3?logo=apachemaven)](https://mvnrepository.com/artifact/io.github.russwyte/slayer)
 
-`slayer` is a small library for stubbing service traits in ZIO tests. Given any service trait, you can synthesize a
-`ZLayer` that satisfies it and configure per-method behavior from the test body. It is inspired by Kit Langton's
-[stubby](https://github.com/kitlangton/stubby) and addresses four of its limitations:
+`slayer` is a small library for **stubbing** service traits in ZIO tests — not a full mock framework. There is no
+verify/times DSL and no argument matchers beyond the `any[A]` type placeholder. Given any service trait (including
+methods inherited from parent traits), you synthesize a `ZLayer` that satisfies it and configure per-method behavior
+from the test body. For structured call history, use `stubbedTraced` (or a `Ref` + handler — see
+[`ExampleSpec`](core/src/test/scala/slayer/ExampleSpec.scala) and
+[`TracingSpec`](core/src/test/scala/slayer/TracingSpec.scala)).
+
+It is inspired by Kit Langton's [stubby](https://github.com/kitlangton/stubby) and addresses four of its limitations:
 
 1. **No arity ceiling** — stubby hardcoded `F1..F9`. slayer unrolls the user's handler into an `Array[Any] => Any`
    adapter, so any number of parameters works.
@@ -137,10 +142,33 @@ methods with defaults across multiple parameter lists.
 `stub[S](selector)(result)` — selector is a lambda picking a method; `result` is either a value of the method's return
 type, or a function whose flat parameters match the method's flat value parameters.
 
-`stubbed[S]` — a `ZLayer` that synthesizes a class implementing `S` (and exposes its `Stubbed[S]` store). Provide it
-once per service per test.
+`stubbed[S]` — a `ZLayer` that synthesizes a class implementing `S` (including members inherited from parent
+traits/classes) and exposes its `Stubbed[S]` store. Provide it once per service per test.
 
-`any[A]` — a placeholder used inside selectors. Never evaluated; only its type matters.
+`stubbedTraced[S]` — same as `stubbed`, but enables call recording. Every invoke appends a `Call(MethodId, args)`.
+Results are returned unchanged (no auto-`.debug` — add that on your stubbed effects if you want console tracing).
+Read history with `ZIO.serviceWith[Stubbed[S]](_.calls)` / `.callsFor(id)` / `.clearCalls()`.
+
+`any[A]` — a typed placeholder inside selectors only. **Not** an argument matcher (`eq` / `argThat` do not exist).
+Never evaluated at runtime; only the selected member and its types matter. Branch on arguments inside a function
+handler when you need call-site discrimination.
+
+### Call tracing
+
+```scala
+val program =
+  for
+    _     <- stub[Repo](_.find(any[Int]))(ZIO.succeed(Some("hello")))
+    _     <- ZIO.serviceWithZIO[Repo](_.find(7))
+    calls <- ZIO.serviceWith[Stubbed[Repo]](_.calls)
+  yield assertTrue(
+    calls == Chunk(Call(MethodId("find", List("Int")), List(7)))
+  )
+program.provide(stubbedTraced[Repo])
+```
+
+Recording happens at **invoke** time (args always available). Optional console debugging is yours to add, e.g.
+`stub[Repo](_.find(any))(ZIO.succeed(...).debug("find"))`.
 
 ## How it works
 
@@ -151,11 +179,18 @@ once per service per test.
 - type-checks the result against the method's return; if it's a function, walks the handler's `Function*` chain and
   emits an `Array[Any] => Any` adapter that casts each slot to the right type.
 
-`stubbed[S]` is a macro that synthesizes a class extending `S & Stubbed[S]`. Each method packs its value arguments
-(dropping `using` clauses) into an `Array[Any]` and calls `callStubbed` with the same `MethodId` the stub side
-produces. Lookup is a single concurrent-map read.
+`stubbed[S]` is a macro that synthesizes a class extending `S & Stubbed[S]`. It overrides every non-private method of
+`S` declared **or inherited** (via Quotes `methodMembers`, excluding `Object`/`Any`/`Matchable` platform members).
+Each method packs its value arguments (dropping `using` clauses) into an `Array[Any]` and calls `callStubbed` with
+the same `MethodId` the stub side produces. Lookup is a single concurrent-map read.
 
 ## Limitations
+
+**Out of scope (by design — stub, not mock):**
+
+- No verify / times / never / inOrder DSL — use `stubbedTraced` + `calls` / `callsFor`, or a `Ref` in a handler.
+- No argument matchers — `any[A]` only carries type information for the selector; handlers branch on real args.
+- No sequential stub queues — last `stub` for a `MethodId` wins.
 
 **Slayer-level:**
 
@@ -164,6 +199,10 @@ produces. Lookup is a single concurrent-map read.
 - **`final` classes** can't be used as the service type — slayer needs to synthesize a subclass.
 - **`final` methods** on a class can't be stubbed (or even left to fall through) — slayer overrides every trait/class
   method, and `final` blocks the override. Either remove `final` or make the type a trait.
+- **Abstract `val`s are not stubbable.** A stable `val` body runs when the layer is built (before any `stub(...)`),
+  and Scala rejects completing a non-lazy abstract val with `lazy val` or `def`. `stubbed` fails at compile time
+  with a message naming the vals — change them to `def`. Concrete vals still inherit (fall through) without stubbing.
+- **Arbitrary `var`s, type members, and self-types** are not a supported service surface.
 
 **Scala-language (surfaces before slayer runs, not slayer-specific):**
 
