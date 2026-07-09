@@ -30,14 +30,14 @@ object InheritanceSpec extends ZIOSpecDefault:
     test("inherited abstract method from parent trait is stubbable end-to-end") {
       val program =
         for
-          _   <- stub[Repo](_.find(slayer.any[Int]))("found")
-          _   <- stub[Repo](_.label)("L")
-          _   <- stub[Repo](_.mid(slayer.any[Int]))(9)
-          _   <- stub[Repo](_.save(slayer.any[String]))(ZIO.unit)
-          a   <- ZIO.serviceWith[Repo](_.find(1))
-          b   <- ZIO.serviceWith[Repo](_.label)
-          c   <- ZIO.serviceWith[Repo](_.mid(3))
-          _   <- ZIO.serviceWithZIO[Repo](_.save("x"))
+          _ <- stub[Repo](_.find(slayer.any[Int]))("found")
+          _ <- stub[Repo](_.label)("L")
+          _ <- stub[Repo](_.mid(slayer.any[Int]))(9)
+          _ <- stub[Repo](_.save(slayer.any[String]))(ZIO.unit)
+          a <- ZIO.serviceWith[Repo](_.find(1))
+          b <- ZIO.serviceWith[Repo](_.label)
+          c <- ZIO.serviceWith[Repo](_.mid(3))
+          _ <- ZIO.serviceWithZIO[Repo](_.save("x"))
         yield (a, b, c)
       for tup <- program.provide(stubbed[Repo])
       yield assertTrue(tup == ("found", "L", 9))
@@ -78,7 +78,7 @@ object InheritanceSpec extends ZIOSpecDefault:
     test("unstubbed inherited abstract method raises NoStub") {
       val program =
         for
-          _   <- stub[Repo](_.label)("only-label")
+          _ <- stub[Repo](_.label)("only-label")
           // find/mid/save left unstubbed
           got <- ZIO.serviceWith[Repo](_.find(1)).exit
         yield got

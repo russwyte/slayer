@@ -169,7 +169,7 @@ object StubbedRuntimeSpec extends ZIOSpecDefault:
         val id  = MethodId("foo", List("Int"))
         val err = SlayerError.NoStub(id)
         assertTrue(err.getMessage.contains("foo")) && assertTrue(err.getMessage.contains("Int"))
-      },
+      }
     ),
     suite("tracing (runtime)")(
       test("quiet by default — no calls recorded") {
@@ -251,12 +251,13 @@ object StubbedRuntimeSpec extends ZIOSpecDefault:
             s.callsFor(idB).map(_.args) == Chunk(List(9)),
             s.callsFor(MethodId("nope", Nil)).isEmpty,
           )
+        end for
       },
       test("ZIO result is returned as-is under tracing (not forced at call time)") {
         val s  = NoOpStubbed()
         val id = MethodId("load", Nil)
         s.enableTracing()
-        var ran = false
+        var ran              = false
         val raw: UIO[String] = ZIO.succeed { ran = true; "ok" }
         for _ <- s.insertValueImpl(id, raw)
         yield

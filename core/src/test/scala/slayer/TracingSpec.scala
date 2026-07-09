@@ -78,8 +78,8 @@ object TracingSpec extends ZIOSpecDefault:
             before = store.calls
             _      = store.enableTracing()
             mid    = store.isTracing
-            _     <- ZIO.serviceWith[Repo](_.find(2))
-            after  = store.calls
+            _ <- ZIO.serviceWith[Repo](_.find(2))
+            after = store.calls
           yield (before, mid, after)
         for tup <- program.provide(stubbed[Repo])
         yield assertTrue(
@@ -92,11 +92,11 @@ object TracingSpec extends ZIOSpecDefault:
         val program =
           for
             store <- ZIO.service[Stubbed[Repo]]
-            _      = store.enableTracing()
-            _      = store.enableTracing()
-            _     <- stub[Repo](_.now)(1L)
-            _     <- ZIO.serviceWith[Repo](_.now)
-            _     <- ZIO.serviceWith[Repo](_.now)
+            _ = store.enableTracing()
+            _ = store.enableTracing()
+            _ <- stub[Repo](_.now)(1L)
+            _ <- ZIO.serviceWith[Repo](_.now)
+            _ <- ZIO.serviceWith[Repo](_.now)
           yield store.calls
         for calls <- program.provide(stubbed[Repo])
         yield assertTrue(calls.size == 2, calls.forall(_.id == MethodId("now", Nil)))
@@ -273,10 +273,10 @@ object TracingSpec extends ZIOSpecDefault:
             _     <- stub[Repo](_.find(slayer.any[Int]))("still-there")
             _     <- ZIO.serviceWith[Repo](_.find(1))
             store <- ZIO.service[Stubbed[Repo]]
-            _      = store.clearCalls()
-            after  = store.calls
+            _     = store.clearCalls()
+            after = store.calls
             again <- ZIO.serviceWith[Repo](_.find(2))
-            more   = store.calls
+            more = store.calls
           yield (after, again, more)
         for tup <- program.provide(stubbedTraced[Repo])
         yield
@@ -291,8 +291,8 @@ object TracingSpec extends ZIOSpecDefault:
         val program =
           for
             store <- ZIO.service[Stubbed[Repo]]
-            _      = store.clearCalls()
-            _      = store.clearCalls()
+            _ = store.clearCalls()
+            _ = store.clearCalls()
           yield store.calls
         for calls <- program.provide(stubbedTraced[Repo])
         yield assertTrue(calls.isEmpty)
@@ -303,9 +303,9 @@ object TracingSpec extends ZIOSpecDefault:
             _     <- stub[Repo](_.find(slayer.any[Int]))("x")
             _     <- ZIO.serviceWith[Repo](_.find(1))
             store <- ZIO.service[Stubbed[Repo]]
-            snap   = store.calls
-            _      = store.clearCalls()
-            _     <- ZIO.serviceWith[Repo](_.find(2))
+            snap = store.calls
+            _    = store.clearCalls()
+            _ <- ZIO.serviceWith[Repo](_.find(2))
           yield (snap, store.calls)
         for tup <- program.provide(stubbedTraced[Repo])
         yield assertTrue(
@@ -348,7 +348,7 @@ object TracingSpec extends ZIOSpecDefault:
           for
             store <- ZIO.service[Stubbed[Repo]]
             exit  <- ZIO.serviceWith[Repo](_.find(99)).exit
-            calls  = store.calls
+            calls = store.calls
           yield (exit, calls)
         for tup <- program.provide(stubbedTraced[Repo])
         yield assertTrue(
@@ -430,8 +430,8 @@ object TracingSpec extends ZIOSpecDefault:
       test("parallel invokes all appear in the call log") {
         val program =
           for
-            _     <- stub[Repo](_.find(slayer.any[Int]))((id: Int) => s"$id")
-            _     <- ZIO.foreachParDiscard(1 to 50) { i =>
+            _ <- stub[Repo](_.find(slayer.any[Int]))((id: Int) => s"$id")
+            _ <- ZIO.foreachParDiscard(1 to 50) { i =>
               ZIO.serviceWith[Repo](_.find(i))
             }
             calls <- callsOf[Repo]
@@ -444,7 +444,7 @@ object TracingSpec extends ZIOSpecDefault:
             args == (1 to 50).toSet,
             calls.forall(_.id == MethodId("find", List("Int"))),
           )
-      },
+      }
     ),
     suite("effect stubs under tracing")(
       test("effectful value stub returns correct result and is recorded") {
@@ -470,13 +470,13 @@ object TracingSpec extends ZIOSpecDefault:
         yield assertTrue(out == "id=11")
       },
       test("returned effect is not forced at callStubbed — only when run") {
-        var ran = false
+        var ran     = false
         val program =
           for
             _      <- stub[Repo](_.load(slayer.any[Int]))(ZIO.succeed { ran = true; "x" })
             effect <- ZIO.serviceWith[Repo](_.load(1))
-            mid     = ran
-            out    <- effect
+            mid = ran
+            out <- effect
           yield (mid, out, ran)
         for tup <- program.provide(stubbedTraced[Repo])
         yield assertTrue(tup._1 == false, tup._2 == "x", tup._3 == true)

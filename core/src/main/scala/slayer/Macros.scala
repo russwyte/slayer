@@ -114,7 +114,6 @@ private[slayer] object Macros:
     val jvmName = jvmNameOf(sym)
     val erased  = flatten(sym.termRef)._2.collect { case (tpe, false) => erasedTypeName(tpe) }
     (jvmName, erased)
-  end methodKeyOf
 
   /** Resolve the JVM-visible name of a method symbol.
     *
@@ -170,8 +169,8 @@ private[slayer] object Macros:
     *   - A `lazy val` may not override a non-lazy abstract val (Scala rejects it).
     *   - A `def` may not complete an abstract val either ("needs to be a stable, immutable value").
     *
-    * `stubbed` aborts with a clear error if any are present; change them to `def` on the service trait.
-    * Concrete vals still inherit normally (no override).
+    * `stubbed` aborts with a clear error if any are present; change them to `def` on the service trait. Concrete vals
+    * still inherit normally (no override).
     */
   private def collectAbstractFields(using
       Quotes
@@ -528,7 +527,7 @@ private[slayer] object Macros:
     val serviceSym  = serviceRepr.typeSymbol
     // Declared *and* inherited methods (parent traits). Abstract methods → callStubbed (throws NoStub when missing).
     // Concrete methods → callStubbedOrElse with super fall-through. `$default$` / Synthetic filtered out.
-    val methods = collectServiceMethods(serviceSym)
+    val methods        = collectServiceMethods(serviceSym)
     val abstractFields = collectAbstractFields(serviceSym, methods.map(_.name).toSet)
     if abstractFields.nonEmpty then
       val names = abstractFields.map(_.name).distinct.mkString(", ")

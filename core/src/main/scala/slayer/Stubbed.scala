@@ -40,8 +40,8 @@ object StubResult:
   * synchronous (a `ZIO` cannot be returned from an arbitrary trait method), so we need a thread-safe store with a
   * synchronous `get` API.
   *
-  * When tracing is enabled (`stubbedTraced` / [[enableTracing]]), every invoke appends a [[Call]]. Results are
-  * returned unchanged — add `.debug` on stubbed effects yourself if you want console tracing.
+  * When tracing is enabled (`stubbedTraced` / [[enableTracing]]), every invoke appends a [[Call]]. Results are returned
+  * unchanged — add `.debug` on stubbed effects yourself if you want console tracing.
   */
 trait Stubbed[A]:
   protected[slayer] val ref: ConcurrentHashMap[MethodId, StubResult] = new ConcurrentHashMap()
